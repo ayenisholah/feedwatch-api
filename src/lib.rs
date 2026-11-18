@@ -2,7 +2,7 @@
 //!
 //! Routes are mounted under `/api` (feedwatch-platform `docs/DATA_CONTRACT.md#api`).
 //! Module map: `routes` builds the router, `influx` runs Flux and `queries` builds and reads it
-//! (FR-FW-6), `error` maps failures to responses, `cache` holds 30 s responses and `limits` rate-limits
+//! (FR-FW-6), `error` maps failures to responses, `cache` holds 15 s responses and `limits` rate-limits
 //! clients (GR-2), `config` reads the environment.
 
 pub mod cache;
