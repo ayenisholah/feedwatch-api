@@ -28,7 +28,7 @@ pub struct InfluxConfig {
 pub type Row = HashMap<String, String>;
 
 /// Why a query failed.
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum InfluxError {
     /// InfluxDB couldn't be reached, or the connection failed mid-response.
     #[error("influxdb unreachable: {0}")]

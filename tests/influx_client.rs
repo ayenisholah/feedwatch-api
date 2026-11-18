@@ -8,14 +8,12 @@
 
 use std::time::Duration;
 
+mod common;
+
+use common::{TOKEN, influx, seed};
 use feedwatch_api::influx::{HttpInflux, InfluxConfig, InfluxError, InfluxQuery};
-use testcontainers::core::{IntoContainerPort, WaitFor};
-use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use wiremock::matchers::{body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
-
-const TOKEN: &str = "feedwatch-test-token";
 
 fn config(url: String) -> InfluxConfig {
     InfluxConfig {
@@ -82,46 +80,6 @@ async fn fr_fw_6_times_out_and_reports_unreachable() {
         Err(InfluxError::Unreachable(_))
     ));
     assert_eq!(client.bucket(), "feedwatch");
-}
-
-async fn influx() -> (ContainerAsync<GenericImage>, String) {
-    let container = GenericImage::new("influxdb", "2.9.1")
-        .with_exposed_port(8086.tcp())
-        .with_wait_for(WaitFor::Nothing)
-        .with_env_var("DOCKER_INFLUXDB_INIT_MODE", "setup")
-        .with_env_var("DOCKER_INFLUXDB_INIT_USERNAME", "feedwatch")
-        .with_env_var("DOCKER_INFLUXDB_INIT_PASSWORD", "feedwatch-test")
-        .with_env_var("DOCKER_INFLUXDB_INIT_ORG", "feedwatch")
-        .with_env_var("DOCKER_INFLUXDB_INIT_BUCKET", "feedwatch")
-        .with_env_var("DOCKER_INFLUXDB_INIT_ADMIN_TOKEN", TOKEN)
-        .start()
-        .await
-        .unwrap();
-    let port = container.get_host_port_ipv4(8086).await.unwrap();
-    (container, format!("http://127.0.0.1:{port}"))
-}
-
-/// Writes line protocol, retrying while setup mode restarts influxd.
-async fn seed(url: &str, lines: &str) {
-    let client = reqwest::Client::new();
-    for _ in 0..60 {
-        let sent = client
-            .post(format!("{url}/api/v2/write"))
-            .query(&[
-                ("org", "feedwatch"),
-                ("bucket", "feedwatch"),
-                ("precision", "s"),
-            ])
-            .header("authorization", format!("Token {TOKEN}"))
-            .body(lines.to_owned())
-            .send()
-            .await;
-        if sent.is_ok_and(|r| r.status().as_u16() == 204) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
-    panic!("InfluxDB never accepted a write");
 }
 
 #[tokio::test]
