@@ -133,6 +133,11 @@ async fn rate_limit(State(state): State<AppState>, request: Request, next: Next)
 const MAX_CACHED_BODY: usize = 4 * 1024 * 1024;
 
 async fn cache_responses(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    // The layer wraps the whole route, including its 405 for other methods: only GETs are cached
+    // or served from the cache.
+    if request.method() != Method::GET {
+        return next.run(request).await;
+    }
     let key = request
         .uri()
         .path_and_query()

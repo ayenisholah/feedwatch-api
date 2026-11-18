@@ -47,6 +47,41 @@ async fn gr_2_only_get_is_allowed() {
 }
 
 #[tokio::test]
+async fn gr_2_other_methods_are_405_even_when_the_get_is_cached() {
+    let store = FakeStore::new().on(
+        "feed_round",
+        &csv(&[(
+            "feed_round",
+            "base",
+            "ETH",
+            "",
+            "2026-11-18T00:04:00Z",
+            "value",
+            "1",
+        )]),
+    );
+    let app = app(store);
+    assert_eq!(
+        send(&app, get_from("/api/feeds", "198.51.100.9"))
+            .await
+            .status(),
+        StatusCode::OK
+    );
+    for method in ["POST", "PUT", "DELETE"] {
+        let request = Request::builder()
+            .method(method)
+            .uri("/api/feeds")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(
+            send(&app, request).await.status(),
+            StatusCode::METHOD_NOT_ALLOWED,
+            "{method} must not get the cached GET body"
+        );
+    }
+}
+
+#[tokio::test]
 async fn gr_2_cors_allows_only_the_site_origin() {
     let app = app(FakeStore::new());
     let from = |origin: &str| {
