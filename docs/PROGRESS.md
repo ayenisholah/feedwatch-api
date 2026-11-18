@@ -6,19 +6,18 @@ Read this first. Update it in the same commit as the work. The system-wide state
 
 ## Next step
 
-Branch `feat/limits` (GR-2), in `src/cache.rs` and `src/routes.rs`:
+M2's API work is done. To close M2:
 
-- GET only: assert that POST returns 405.
-- CORS: `tower-http` `CorsLayer` allows only `Config::allowed_origin`, with GET and OPTIONS.
-- Rate limit per client IP from `X-Forwarded-For` (Caddy sets it): 2 requests per second, burst 20; over the limit is 429.
-- A 30 s response cache keyed by path and query, holding only 200s, with an injected clock. It covers the feeds, compare and incidents routes (not health) and sets `Cache-Control: public, max-age=30`.
+1. Tag `v0.1.0` (it must match `Cargo.toml`). `release.yml` publishes the release with `openapi.json`, the contract feedwatch-web pins in M3.
+2. In feedwatch-platform: point `DATA_CONTRACT.md` at the release, add the `api` service to the local `compose.yaml`, and mark FR-FW-6, NFR-2 and GR-2 done.
 
-Then tag `v0.1.0` to release `openapi.json`, and point feedwatch-platform `DATA_CONTRACT.md` at it.
+Then M3 in feedwatch-web: `feat/api-client` against `openapi.json` v0.1.0.
 
 ## Done
 
 | Date | Work |
 |---|---|
+| 2026-11-18 | `feat/limits` (GR-2):\<br>- **GET only:** every route; other methods are 405.\<br>- **CORS:** `tower-http` with `AllowOrigin::list`, so the header is sent only to `FEEDWATCH_ALLOWED_ORIGIN`; methods GET and OPTIONS.\<br>- **Rate limit:** a token bucket per client IP (`src/limits.rs`), burst 20, refilled at 2 per second; over it is 429 with `Retry-After: 1`. The IP is the first `X-Forwarded-For` entry (set by Caddy), else the peer address (`into_make_service_with_connect_info`). At 10,000 tracked clients, full buckets are dropped.\<br>- **Cache:** 30 s (`src/cache.rs`) on the feeds, compare and incidents routes, keyed by path and query. It keeps only 200s, holds at most 1,000 entries, and sends `Cache-Control: public, max-age=30`.\<br>- **Time:** both use the injected clock. |
 | 2026-11-18 | `feat/openapi` (FR-FW-6 contract): utoipa 6 generates an OpenAPI 3.1 document from handler annotations and schema derives (`ApiDoc`), served at `GET /api/openapi.json` and committed as `openapi.json`. `fr_fw_6_openapi_matches_committed` fails on drift (`UPDATE_OPENAPI=1` rewrites the file). `release.yml` publishes a GitHub release with `openapi.json` attached for each `v*` tag, after checking that the tag matches `Cargo.toml` and that the document is current. |
 | 2026-11-18 | `feat/incidents` (FR-FW-6): `GET /api/incidents?status=open\|all` (default `open`; anything else is 400) returns `{incidents}`, newest first, at most 500. Each has `{id, chain, feedId, kind, openedAt, closedAt, detail}`. The query reads `incident_id` and `detail` over 30 days. `pair_incidents` joins each event's two fields by time and tags, and pairs open and close by ID; a close whose open is older than 30 days keeps `openedAt: null`. Tested with fake CSV (quotes and commas in details, kind changes, the cap) and a real InfluxDB. |
 | 2026-11-18 | `feat/compare` (FR-FW-6): `GET /api/compare` returns `{lastPollAt, feeds}` for the feeds present on all three chains. Each has `chains.{ethereum,arbitrum,base}` with `{value, ageS, status}`, and `spreadPct` (range over median of the readable values; `null` with fewer than two). `spread` is copied from the poller with its test, so both repos use one definition. |

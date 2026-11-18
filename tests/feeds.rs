@@ -265,7 +265,11 @@ async fn fr_fw_6_serves_seeded_points_from_real_influxdb() {
         Duration::from_secs(5),
     )
     .unwrap();
-    let app = router(AppState::new(Arc::new(store), "feedwatch".into()));
+    let app = router(AppState::new(
+        Arc::new(store),
+        "feedwatch".into(),
+        common::ORIGIN.into(),
+    ));
 
     let (status, body) = get(app.clone(), "/api/feeds").await;
     assert_eq!(status, StatusCode::OK, "{body}");
