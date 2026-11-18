@@ -17,6 +17,7 @@ thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net", "signal"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+utoipa = { version = "6", features = ["axum_extras", "preserve_order"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
