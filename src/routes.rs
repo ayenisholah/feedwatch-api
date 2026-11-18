@@ -1,4 +1,4 @@
-//! The HTTP router: `/api/health` (NFR-2), and the feed and compare routes (FR-FW-6).
+//! The HTTP router: `/api/health` (NFR-2), and the feed, compare and incident routes (FR-FW-6).
 //!
 //! Handlers only parse the request, run a query from [`crate::queries`] through the injected
 //! [`InfluxQuery`], and shape the result. Time is injected too, so tests control it.
@@ -14,8 +14,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::ApiError;
 use crate::influx::InfluxQuery;
 use crate::queries::{
-    Chain, CompareRow, FeedSummary, SeriesPoint, compare, health_query, last_poll_at,
-    latest_by_feed, latest_query, series_points, series_query, valid_feed_id,
+    Chain, CompareRow, FeedSummary, Incident, SeriesPoint, compare, health_query, incidents_query,
+    last_poll_at, latest_by_feed, latest_query, pair_incidents, series_points, series_query,
+    valid_feed_id,
 };
 
 /// How long `/api/health` waits for InfluxDB, so it answers within 1 s (NFR-2).
@@ -61,6 +62,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/feeds", get(feeds))
         .route("/api/feeds/{chain}/{feed_id}", get(feed_detail))
         .route("/api/compare", get(compare_feeds))
+        .route("/api/incidents", get(incidents))
         .with_state(state)
 }
 
@@ -188,6 +190,38 @@ async fn compare_feeds(State(state): State<AppState>) -> Result<Json<CompareResp
     Ok(Json(CompareResponse {
         last_poll_at: last_poll_at(&rows),
         feeds: compare(&latest_by_feed(&rows)),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct IncidentsParams {
+    status: Option<String>,
+}
+
+/// Body of `GET /api/incidents`.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct IncidentsResponse {
+    /// Incidents from the last 30 days, newest first, at most 500.
+    pub incidents: Vec<Incident>,
+}
+
+async fn incidents(
+    State(state): State<AppState>,
+    Query(params): Query<IncidentsParams>,
+) -> Result<Json<IncidentsResponse>, ApiError> {
+    let open_only = match params.status.as_deref() {
+        None | Some("" | "open") => true,
+        Some("all") => false,
+        Some(other) => {
+            return Err(ApiError::BadRequest(format!(
+                "unknown status {other:?}; expected open or all"
+            )));
+        }
+    };
+    let rows = state.store.query(&incidents_query(&state.bucket)).await?;
+    Ok(Json(IncidentsResponse {
+        incidents: pair_incidents(&rows, open_only),
     }))
 }
 

@@ -1,6 +1,6 @@
 //! Flux queries for each route, and the pure functions that turn their rows into responses.
 //!
-//! Delivers FR-FW-6 (feeds and compare) and NFR-2 (health). Flux takes `last()` of every series; Rust then keeps,
+//! Delivers FR-FW-6 (feeds, compare and incidents) and NFR-2 (health). Flux takes `last()` of every series; Rust then keeps,
 //! per feed and measurement, only the fields written at the newest time. That drops a stale optional
 //! field (such as `reference_deviation_pct`, absent from the newest point) and an older `status` series.
 //!
@@ -371,6 +371,105 @@ pub fn spread(values: &[f64]) -> Option<f64> {
     (median != 0.0).then(|| (max - min) / median * 100.0)
 }
 
+/// Every incident event in the last 30 days: the `incident_id` and `detail` fields.
+pub fn incidents_query(bucket: &str) -> String {
+    format!(
+        r#"from(bucket: {})
+  |> range(start: -30d)
+  |> filter(fn: (r) => r._measurement == "incident" and (r._field == "incident_id" or r._field == "detail"))"#,
+        flux_string(bucket)
+    )
+}
+
+/// The most incidents `/api/incidents` returns.
+pub const MAX_INCIDENTS: usize = 500;
+
+/// One incident, from its open and close events.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Incident {
+    /// The poller's incident ID.
+    pub id: String,
+    /// The chain the feed is on.
+    pub chain: Chain,
+    /// The manifest key.
+    pub feed_id: String,
+    /// `stale`, `drift` or `error`.
+    pub kind: String,
+    /// When it opened, Unix seconds; `null` if the open event is older than 30 days.
+    pub opened_at: Option<u64>,
+    /// When it closed, Unix seconds; `null` while open.
+    pub closed_at: Option<u64>,
+    /// What the poller saw when it opened (or closed, if the open is out of range).
+    pub detail: Option<String>,
+}
+
+/// One event: the key that joins its `incident_id` and `detail` rows.
+type EventKey<'a> = (u64, Chain, &'a str, &'a str, &'a str);
+
+/// Pairs [`incidents_query`] rows into incidents, newest first, at most [`MAX_INCIDENTS`].
+/// With `open_only`, drops incidents that have closed.
+pub fn pair_incidents(rows: &[Row], open_only: bool) -> Vec<Incident> {
+    // Join each event's two field rows.
+    let mut events: BTreeMap<EventKey<'_>, (Option<&str>, Option<&str>)> = BTreeMap::new();
+    for row in rows {
+        let (Some(time), Some(chain), Some(feed), Some(kind), Some(event), Some(field)) = (
+            cell(row, "_time").and_then(parse_time),
+            cell(row, "chain").and_then(Chain::parse),
+            cell(row, "feed_id"),
+            cell(row, "kind"),
+            cell(row, "event"),
+            cell(row, "_field"),
+        ) else {
+            continue;
+        };
+        let entry = events.entry((time, chain, feed, kind, event)).or_default();
+        match field {
+            "incident_id" => entry.0 = cell(row, "_value"),
+            "detail" => entry.1 = cell(row, "_value"),
+            _ => {}
+        }
+    }
+
+    let mut incidents: BTreeMap<&str, Incident> = BTreeMap::new();
+    for ((time, chain, feed, kind, event), (id, detail)) in events {
+        let Some(id) = id else { continue };
+        let incident = incidents.entry(id).or_insert_with(|| Incident {
+            id: id.to_owned(),
+            chain,
+            feed_id: feed.to_owned(),
+            kind: kind.to_owned(),
+            opened_at: None,
+            closed_at: None,
+            detail: None,
+        });
+        match event {
+            "open" => {
+                incident.opened_at = Some(time);
+                incident.detail = detail.map(str::to_owned);
+            }
+            "close" => {
+                incident.closed_at = Some(time);
+                if incident.detail.is_none() {
+                    incident.detail = detail.map(str::to_owned);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut list: Vec<Incident> = incidents
+        .into_values()
+        .filter(|i| !open_only || i.closed_at.is_none())
+        .collect();
+    list.sort_by(|a, b| {
+        let newest = |i: &Incident| i.opened_at.or(i.closed_at);
+        newest(b).cmp(&newest(a)).then_with(|| a.id.cmp(&b.id))
+    });
+    list.truncate(MAX_INCIDENTS);
+    list
+}
+
 fn cell<'a>(row: &'a Row, name: &str) -> Option<&'a str> {
     row.get(name).map(String::as_str).filter(|v| !v.is_empty())
 }
@@ -601,5 +700,143 @@ mod tests {
         assert_eq!(spread(&[0.0, 0.0]), None);
         assert!((spread(&[99.0, 100.0, 101.0]).unwrap() - 2.0).abs() < 1e-9);
         assert!((spread(&[100.0, 102.0]).unwrap() - 1.980_198).abs() < 1e-5);
+    }
+
+    fn event(time: &str, feed: &str, kind: &str, event: &str, id: &str, detail: &str) -> Vec<Row> {
+        let base = [
+            ("_measurement", "incident"),
+            ("chain", "ethereum"),
+            ("feed_id", feed),
+            ("kind", kind),
+            ("event", event),
+            ("_time", time),
+        ];
+        let mut with_id = base.to_vec();
+        with_id.extend([("_field", "incident_id"), ("_value", id)]);
+        let mut with_detail = base.to_vec();
+        with_detail.extend([("_field", "detail"), ("_value", detail)]);
+        vec![row(&with_id), row(&with_detail)]
+    }
+
+    /// Six events: a stale open and close, a drift that becomes an error, and a close whose
+    /// open is out of range.
+    fn incident_events() -> Vec<Row> {
+        [
+            event(
+                "2026-11-18T00:00:00Z",
+                "ETH",
+                "stale",
+                "open",
+                "i-1",
+                "age 90000s, heartbeat 86400s",
+            ),
+            event(
+                "2026-11-18T00:10:00Z",
+                "ETH",
+                "stale",
+                "close",
+                "i-1",
+                "fresh again",
+            ),
+            // A kind change: drift closes, error opens with a new ID.
+            event(
+                "2026-11-18T01:00:00Z",
+                "USUAL",
+                "drift",
+                "open",
+                "i-2",
+                "off 1.2%",
+            ),
+            event("2026-11-18T02:00:00Z", "USUAL", "drift", "close", "i-2", ""),
+            event(
+                "2026-11-18T02:00:00Z",
+                "USUAL",
+                "error",
+                "open",
+                "i-3",
+                "reverted, InvalidLastUpdateDetails",
+            ),
+            // Only the close is within 30 days.
+            event(
+                "2026-11-17T00:00:00Z",
+                "BTC",
+                "drift",
+                "close",
+                "i-0",
+                "back within threshold",
+            ),
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn fr_fw_6_pairs_open_and_close_events_by_id() {
+        let rows = incident_events();
+
+        let all = pair_incidents(&rows, false);
+        let ids: Vec<&str> = all.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["i-3", "i-2", "i-1", "i-0"]);
+        assert_eq!(all[2].opened_at, parse_time("2026-11-18T00:00:00Z"));
+        assert_eq!(all[2].closed_at, parse_time("2026-11-18T00:10:00Z"));
+        assert_eq!(
+            all[2].detail.as_deref(),
+            Some("age 90000s, heartbeat 86400s")
+        );
+        assert_eq!(all[0].kind, "error");
+        assert_eq!(
+            all[0].detail.as_deref(),
+            Some("reverted, InvalidLastUpdateDetails")
+        );
+        assert_eq!(all[3].opened_at, None);
+        assert_eq!(all[3].detail.as_deref(), Some("back within threshold"));
+
+        let open = pair_incidents(&rows, true);
+        assert_eq!(open.len(), 1);
+        assert_eq!(open[0].id, "i-3");
+        assert_eq!(open[0].closed_at, None);
+    }
+
+    #[test]
+    fn fr_fw_6_incidents_skip_unusable_rows_and_are_capped() {
+        let mut rows = vec![row(&[
+            ("_measurement", "incident"),
+            ("chain", "solana"),
+            ("_time", "2026-11-18T00:00:00Z"),
+        ])];
+        rows.extend(event(
+            "2026-11-18T00:00:00Z",
+            "ETH",
+            "stale",
+            "weird",
+            "i-9",
+            "x",
+        ));
+        rows.push(row(&[
+            ("chain", "base"),
+            ("feed_id", "ETH"),
+            ("kind", "stale"),
+            ("event", "open"),
+            ("_time", "2026-11-18T00:00:00Z"),
+            ("_field", "detail"),
+            ("_value", "no id"),
+        ]));
+        let list = pair_incidents(&rows, false);
+        assert_eq!(list.len(), 1, "only the event with an ID counts");
+        assert_eq!(list[0].opened_at, None, "unknown event kinds are ignored");
+
+        let many: Vec<Row> = (0..MAX_INCIDENTS + 5)
+            .flat_map(|n| {
+                event(
+                    &format!("2026-11-18T00:{:02}:{:02}Z", n / 60 % 60, n % 60),
+                    "ETH",
+                    "stale",
+                    "open",
+                    &format!("i-{n:04}"),
+                    "",
+                )
+            })
+            .collect();
+        assert_eq!(pair_incidents(&many, true).len(), MAX_INCIDENTS);
+        assert!(incidents_query("feedwatch").contains("range(start: -30d)"));
     }
 }
