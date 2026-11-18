@@ -1,5 +1,6 @@
 //! Entry point. Wires modules together only (feedwatch-platform `docs/ENGINEERING_STANDARDS.md`).
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -17,14 +18,18 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let bucket = config.influx.bucket.clone();
     let store = HttpInflux::new(config.influx.clone(), Duration::from_secs(10))?;
-    let state = AppState::new(Arc::new(store), bucket);
+    let state = AppState::new(Arc::new(store), bucket, config.allowed_origin.clone());
 
     let listener = tokio::net::TcpListener::bind(config.addr).await?;
     tracing::info!(addr = %config.addr, influx = %config.influx.url, "listening");
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await?;
+    // Peer addresses let the rate limiter work for requests that bypass Caddy (GR-2).
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await?;
     Ok(())
 }

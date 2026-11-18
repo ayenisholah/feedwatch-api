@@ -1,9 +1,11 @@
 //! Errors a route can return, as JSON `{ "error": "…" }` with a fitting status.
 //!
-//! Part of FR-FW-6. InfluxDB failures become 503 with a generic message; the detail goes to the log.
+//! Part of FR-FW-6 and GR-2. InfluxDB failures become 503 with a generic message; the detail goes to
+//! the log. Rate-limited requests get 429 with `Retry-After`.
 
 use axum::Json;
 use axum::http::StatusCode;
+use axum::http::header::RETRY_AFTER;
 use axum::response::{IntoResponse, Response};
 use serde::Serialize;
 use serde_json::json;
@@ -27,6 +29,8 @@ pub enum ApiError {
     NotFound(String),
     /// InfluxDB failed or timed out.
     Unavailable(InfluxError),
+    /// The client sent too many requests (GR-2).
+    TooManyRequests,
 }
 
 impl From<InfluxError> for ApiError {
@@ -40,6 +44,10 @@ impl IntoResponse for ApiError {
         let (status, message) = match self {
             ApiError::BadRequest(message) => (StatusCode::BAD_REQUEST, message),
             ApiError::NotFound(message) => (StatusCode::NOT_FOUND, message),
+            ApiError::TooManyRequests => {
+                let body = Json(json!({ "error": "too many requests; slow down" }));
+                return (StatusCode::TOO_MANY_REQUESTS, [(RETRY_AFTER, "1")], body).into_response();
+            }
             ApiError::Unavailable(error) => {
                 tracing::error!(%error, "influxdb query failed");
                 (

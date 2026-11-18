@@ -1,5 +1,6 @@
-//! The HTTP router: `/api/health` (NFR-2), the feed, compare and incident routes (FR-FW-6), and
-//! `/api/openapi.json`, generated from the handlers' annotations ([`ApiDoc`]).
+//! The HTTP router: `/api/health` (NFR-2), the feed, compare and incident routes (FR-FW-6),
+//! `/api/openapi.json` ([`ApiDoc`]), and the public-API limits (GR-2): GET only, CORS for the site
+//! origin, per-client rate limits and a 30 s cache.
 //!
 //! Handlers only parse the request, run a query from [`crate::queries`] through the injected
 //! [`InfluxQuery`], and shape the result. Time is injected too, so tests control it.
@@ -7,14 +8,21 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, Query, Request, State};
+use axum::http::header::{CACHE_CONTROL, CONTENT_TYPE};
+use axum::http::{HeaderValue, Method, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use utoipa::{IntoParams, OpenApi, ToSchema};
 
+use crate::cache::{Cached, ResponseCache, TTL_S};
 use crate::error::{ApiError, ErrorBody};
 use crate::influx::InfluxQuery;
+use crate::limits::{RateLimiter, client_ip};
 use crate::queries::{
     Chain, CompareRow, FeedSummary, Incident, SeriesPoint, compare, health_query, incidents_query,
     last_poll_at, latest_by_feed, latest_query, pair_incidents, series_points, series_query,
@@ -40,33 +48,129 @@ pub struct AppState {
     pub bucket: String,
     /// The current time.
     pub clock: Clock,
+    /// The site origin CORS allows (GR-2).
+    pub allowed_origin: String,
+    /// Per-client rate limits (GR-2).
+    pub limiter: Arc<RateLimiter>,
+    /// Cached responses of the data routes (GR-2).
+    pub cache: Arc<ResponseCache>,
 }
 
 impl AppState {
-    /// State with the system clock.
-    pub fn new(store: Arc<dyn InfluxQuery>, bucket: String) -> AppState {
-        AppState {
+    /// State with the system clock and empty limits and cache.
+    pub fn new(store: Arc<dyn InfluxQuery>, bucket: String, allowed_origin: String) -> AppState {
+        AppState::with_clock(
             store,
             bucket,
-            clock: Arc::new(|| {
+            allowed_origin,
+            Arc::new(|| {
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs())
             }),
+        )
+    }
+
+    /// State with the given clock, for tests.
+    pub fn with_clock(
+        store: Arc<dyn InfluxQuery>,
+        bucket: String,
+        allowed_origin: String,
+        clock: Clock,
+    ) -> AppState {
+        AppState {
+            store,
+            bucket,
+            clock,
+            allowed_origin,
+            limiter: Arc::new(RateLimiter::default()),
+            cache: Arc::new(ResponseCache::default()),
         }
     }
 }
 
 /// Builds the application router.
+///
+/// Every route is GET only (other methods get 405), rate-limited per client, and allows CORS from
+/// the site origin only. The data routes are also cached for [`TTL_S`] seconds (GR-2).
 pub fn router(state: AppState) -> Router {
-    Router::new()
-        .route("/api/health", get(health))
+    let cached = Router::new()
         .route("/api/feeds", get(feeds))
         .route("/api/feeds/{chain}/{feed_id}", get(feed_detail))
         .route("/api/compare", get(compare_feeds))
         .route("/api/incidents", get(incidents))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            cache_responses,
+        ));
+    Router::new()
+        .route("/api/health", get(health))
         .route("/api/openapi.json", get(openapi_json))
+        .merge(cached)
+        .layer(middleware::from_fn_with_state(state.clone(), rate_limit))
+        .layer(cors(&state.allowed_origin))
         .with_state(state)
+}
+
+fn cors(origin: &str) -> CorsLayer {
+    // `list` sends Access-Control-Allow-Origin only when the request's Origin matches; an invalid
+    // configured origin allows none.
+    let allow = AllowOrigin::list(HeaderValue::from_str(origin).ok());
+    CorsLayer::new()
+        .allow_origin(allow)
+        .allow_methods([Method::GET, Method::OPTIONS])
+}
+
+async fn rate_limit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    if state.limiter.allow(client_ip(&request), (state.clock)()) {
+        next.run(request).await
+    } else {
+        ApiError::TooManyRequests.into_response()
+    }
+}
+
+/// Bodies larger than this aren't cached.
+const MAX_CACHED_BODY: usize = 4 * 1024 * 1024;
+
+async fn cache_responses(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let key = request
+        .uri()
+        .path_and_query()
+        .map_or_else(String::new, |p| p.as_str().to_owned());
+    let now = (state.clock)();
+    if let Some(hit) = state.cache.get(&key, now) {
+        let mut response = hit.body.into_response();
+        if let Some(content_type) = hit.content_type {
+            response.headers_mut().insert(CONTENT_TYPE, content_type);
+        }
+        response.headers_mut().insert(CACHE_CONTROL, max_age());
+        return response;
+    }
+    let response = next.run(request).await;
+    if response.status() != StatusCode::OK {
+        return response;
+    }
+    let (mut parts, body) = response.into_parts();
+    let Ok(bytes) = axum::body::to_bytes(body, MAX_CACHED_BODY).await else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
+    parts.headers.insert(CACHE_CONTROL, max_age());
+    state.cache.put(
+        key,
+        Cached {
+            stored_at: now,
+            content_type: parts.headers.get(CONTENT_TYPE).cloned(),
+            body: bytes.clone(),
+        },
+    );
+    Response::from_parts(parts, bytes.into())
+}
+
+// The header below must say the same as the cache's lifetime.
+const _: () = assert!(TTL_S == 30, "update the Cache-Control max-age");
+
+fn max_age() -> HeaderValue {
+    HeaderValue::from_static("public, max-age=30")
 }
 
 /// The OpenAPI document for every route, the contract feedwatch-web builds against

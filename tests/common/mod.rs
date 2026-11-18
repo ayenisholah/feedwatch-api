@@ -19,6 +19,9 @@ use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
 use tower::ServiceExt;
 
+/// The site origin every test app allows.
+pub const ORIGIN: &str = "https://feedwatch.example";
+
 /// Now, for every fake-store test: 2026-11-18T00:05:00Z.
 pub const NOW: u64 = 1_794_960_300;
 
@@ -90,11 +93,12 @@ impl InfluxQuery for FakeStore {
 
 /// The router over `store`, at [`NOW`].
 pub fn app(store: Arc<FakeStore>) -> Router {
-    router(AppState {
+    router(AppState::with_clock(
         store,
-        bucket: "feedwatch".to_owned(),
-        clock: Arc::new(|| NOW),
-    })
+        "feedwatch".to_owned(),
+        ORIGIN.to_owned(),
+        Arc::new(|| NOW),
+    ))
 }
 
 /// GETs `path` and returns the status and JSON body.
