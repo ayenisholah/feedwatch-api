@@ -1,5 +1,5 @@
 //! GR-2: the public API is read-only and bounded: GET only, CORS for the site origin only,
-//! per-client rate limits, and a 30 s cache in front of InfluxDB.
+//! per-client rate limits, and a 15 s cache in front of InfluxDB.
 
 #![allow(clippy::unwrap_used)]
 
@@ -12,6 +12,7 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use common::{FakeStore, NOW, ORIGIN, app, csv};
+use feedwatch_api::cache::TTL_S;
 use feedwatch_api::limits::BURST;
 use feedwatch_api::routes::{AppState, router};
 use tower::ServiceExt;
@@ -144,7 +145,7 @@ async fn gr_2_rate_limits_each_client() {
 }
 
 #[tokio::test]
-async fn gr_2_caches_data_routes_for_30_seconds() {
+async fn gr_2_caches_data_routes_for_their_ttl() {
     let store = FakeStore::new().on(
         "feed_round",
         &csv(&[(
@@ -168,22 +169,22 @@ async fn gr_2_caches_data_routes_for_30_seconds() {
 
     let first = send(&app, get_from("/api/feeds", "198.51.100.1")).await;
     assert_eq!(first.status(), StatusCode::OK);
-    assert_eq!(first.headers()["cache-control"], "public, max-age=30");
+    assert_eq!(first.headers()["cache-control"], "public, max-age=15");
     assert_eq!(store.calls(), 1);
 
-    now.store(NOW + 29, Ordering::SeqCst);
+    now.store(NOW + TTL_S - 1, Ordering::SeqCst);
     let hit = send(&app, get_from("/api/feeds", "198.51.100.1")).await;
     assert_eq!(hit.status(), StatusCode::OK);
     assert_eq!(hit.headers()["content-type"], "application/json");
-    assert_eq!(hit.headers()["cache-control"], "public, max-age=30");
+    assert_eq!(hit.headers()["cache-control"], "public, max-age=15");
     assert_eq!(store.calls(), 1, "served from the cache");
 
     send(&app, get_from("/api/feeds?chain=base", "198.51.100.1")).await;
     assert_eq!(store.calls(), 2, "the query string is part of the key");
 
-    now.store(NOW + 31, Ordering::SeqCst);
+    now.store(NOW + TTL_S + 1, Ordering::SeqCst);
     send(&app, get_from("/api/feeds", "198.51.100.1")).await;
-    assert_eq!(store.calls(), 3, "expired after 30 s");
+    assert_eq!(store.calls(), 3, "expired after the TTL");
 
     // Errors and health aren't cached.
     send(&app, get_from("/api/feeds?chain=solana", "198.51.100.1")).await;

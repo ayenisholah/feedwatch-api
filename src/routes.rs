@@ -1,6 +1,6 @@
 //! The HTTP router: `/api/health` (NFR-2), the feed, compare and incident routes (FR-FW-6),
 //! `/api/openapi.json` ([`ApiDoc`]), and the public-API limits (GR-2): GET only, CORS for the site
-//! origin, per-client rate limits and a 30 s cache.
+//! origin, per-client rate limits and a 15 s cache.
 //!
 //! Handlers only parse the request, run a query from [`crate::queries`] through the injected
 //! [`InfluxQuery`], and shape the result. Time is injected too, so tests control it.
@@ -172,10 +172,10 @@ async fn cache_responses(State(state): State<AppState>, request: Request, next: 
 }
 
 // The header below must say the same as the cache's lifetime.
-const _: () = assert!(TTL_S == 30, "update the Cache-Control max-age");
+const _: () = assert!(TTL_S == 15, "update the Cache-Control max-age");
 
 fn max_age() -> HeaderValue {
-    HeaderValue::from_static("public, max-age=30")
+    HeaderValue::from_static("public, max-age=15")
 }
 
 /// The OpenAPI document for every route, the contract feedwatch-web builds against

@@ -1,4 +1,4 @@
-//! 30-second response cache for the read routes, so a busy page can't hammer InfluxDB.
+//! 15-second response cache for the read routes, so a busy page can't hammer InfluxDB.
 //!
 //! Part of GR-2. Keyed by path and query; only 200 responses are kept. It holds at most
 //! [`MAX_ENTRIES`] responses, dropping expired ones first and skipping new ones when still full.
@@ -11,7 +11,7 @@ use axum::body::Bytes;
 use axum::http::HeaderValue;
 
 /// How long a response is reused, in seconds. Also sent as `Cache-Control: max-age`.
-pub const TTL_S: u64 = 30;
+pub const TTL_S: u64 = 15;
 /// The most responses kept.
 pub const MAX_ENTRIES: usize = 1_000;
 
@@ -82,15 +82,15 @@ mod tests {
     }
 
     #[test]
-    fn gr_2_serves_a_response_for_30_seconds() {
+    fn gr_2_serves_a_response_for_its_ttl() {
         let cache = ResponseCache::default();
         assert!(cache.is_empty());
         cache.put("/api/feeds".into(), cached(100, "a"));
-        assert_eq!(cache.get("/api/feeds", 129).unwrap().body, "a");
-        assert_eq!(cache.get("/api/feeds", 130), None);
+        assert_eq!(cache.get("/api/feeds", 100 + TTL_S - 1).unwrap().body, "a");
+        assert_eq!(cache.get("/api/feeds", 100 + TTL_S), None);
         assert_eq!(cache.get("/api/feeds?chain=base", 100), None);
-        cache.put("/api/feeds".into(), cached(130, "b"));
-        assert_eq!(cache.get("/api/feeds", 130).unwrap().body, "b");
+        cache.put("/api/feeds".into(), cached(100 + TTL_S, "b"));
+        assert_eq!(cache.get("/api/feeds", 100 + TTL_S).unwrap().body, "b");
         assert_eq!(cache.len(), 1);
     }
 
