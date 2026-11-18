@@ -10,11 +10,12 @@
 use std::collections::BTreeMap;
 
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::influx::Row;
 
 /// The chains Feedwatch reads, in display order.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Chain {
     /// Ethereum mainnet.
@@ -136,7 +137,7 @@ pub fn parse_time(text: &str) -> Option<u64> {
 }
 
 /// A feed's latest round and check.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct FeedSummary {
     /// The chain the feed is on.
@@ -266,7 +267,7 @@ pub fn last_poll_at(rows: &[Row]) -> Option<u64> {
 }
 
 /// One point of a feed's 24-hour series.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct SeriesPoint {
     /// End of the 5-minute window, Unix seconds.
@@ -303,7 +304,7 @@ pub fn series_points(rows: &[Row]) -> Vec<SeriesPoint> {
 }
 
 /// One chain's side of a [`CompareRow`].
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ChainValue {
     /// The price on this chain, if it could be read.
@@ -315,7 +316,7 @@ pub struct ChainValue {
 }
 
 /// One feed present on every chain, side by side.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct CompareRow {
     /// The manifest key, such as `ETH`.
@@ -385,7 +386,7 @@ pub fn incidents_query(bucket: &str) -> String {
 pub const MAX_INCIDENTS: usize = 500;
 
 /// One incident, from its open and close events.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct Incident {
     /// The poller's incident ID.

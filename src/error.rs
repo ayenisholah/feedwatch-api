@@ -5,9 +5,18 @@
 use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use serde::Serialize;
 use serde_json::json;
+use utoipa::ToSchema;
 
 use crate::influx::InfluxError;
+
+/// The body of every error response.
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ErrorBody {
+    /// What went wrong, for people.
+    pub error: String,
+}
 
 /// Why a request failed.
 #[derive(Debug, PartialEq, Eq)]

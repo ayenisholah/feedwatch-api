@@ -1,0 +1,30 @@
+# Publishes a release for each v* tag, with openapi.json attached: the API contract feedwatch-web
+# pins (feedwatch-platform docs/DATA_CONTRACT.md). The tag must match Cargo.toml's version, and the
+# committed openapi.json must match the code, or nothing is published.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Tag matches the crate version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[0].version')
+          test "v$version" = "$GITHUB_REF_NAME" || { echo "::error::tag $GITHUB_REF_NAME != Cargo.toml v$version"; exit 1; }
+      - name: openapi.json matches the code
+        run: cargo test --locked --test openapi
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" openapi.json --title "$GITHUB_REF_NAME" --generate-notes --verify-tag
