@@ -45,12 +45,14 @@ impl Chain {
     }
 }
 
-/// Whether `id` can be a manifest feed key: 1 to 64 of `A-Z a-z 0-9 _ . -`.
+/// Whether `id` can be a manifest feed key: 1 to 64 of `A-Z a-z 0-9 _ . - + /`. The manifests use
+/// `+` and `/` (`CASH+_FUNDAMENTAL`, `WBTC/BTC`); quotes, spaces and brackets never appear. The ID
+/// still goes through [`flux_string`] before reaching Flux.
 pub fn valid_feed_id(id: &str) -> bool {
     (1..=64).contains(&id.len())
         && id
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-'))
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.' | b'-' | b'+' | b'/'))
 }
 
 /// `text` as a Flux string literal, with `\`, `"` and `${` escaped.
@@ -637,6 +639,8 @@ mod tests {
         assert!(valid_feed_id("ETH"));
         assert!(valid_feed_id("pzETH_FUNDAMENTAL"));
         assert!(valid_feed_id("wstETH-ETH.v2"));
+        assert!(valid_feed_id("WBTC/BTC"));
+        assert!(valid_feed_id("CASH+_FUNDAMENTAL"));
         for bad in ["", "ETH\"", "a b", "x) or true", &"A".repeat(65)] {
             assert!(!valid_feed_id(bad), "{bad}");
         }

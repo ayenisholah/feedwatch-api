@@ -221,6 +221,35 @@ async fn fr_fw_6_feed_detail_rejects_bad_input_before_querying() {
 }
 
 #[tokio::test]
+async fn fr_fw_6_feed_detail_accepts_manifest_ids_with_slash_and_plus() {
+    // 19 of the 146 manifest keys use `/` or `+`, such as WBTC/BTC and CASH+_FUNDAMENTAL. The web
+    // client sends them percent-encoded in one path segment.
+    let store = FakeStore::new().on(
+        r#"r.feed_id == "WBTC/BTC""#,
+        &csv(&[(
+            "feed_round",
+            "ethereum",
+            "WBTC/BTC",
+            "",
+            T,
+            "value",
+            "1.0001",
+        )]),
+    );
+    let (status, body) = get(app(Arc::clone(&store)), "/api/feeds/ethereum/WBTC%2FBTC").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["latest"]["feedId"], "WBTC/BTC");
+
+    let (status, _) = get(
+        app(Arc::clone(&store)),
+        "/api/feeds/ethereum/CASH%2B_FUNDAMENTAL",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "valid ID, no data");
+    assert_eq!(store.calls(), 4, "both IDs reached the store");
+}
+
+#[tokio::test]
 async fn fr_fw_6_feed_detail_is_503_when_either_query_fails() {
     // Both queries fail.
     let store = FakeStore::new().fail("feed_round", InfluxError::Query("boom".into()));
