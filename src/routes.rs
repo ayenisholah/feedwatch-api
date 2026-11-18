@@ -1,4 +1,4 @@
-//! The HTTP router: `/api/health` (NFR-2) and the feed routes (FR-FW-6).
+//! The HTTP router: `/api/health` (NFR-2), and the feed and compare routes (FR-FW-6).
 //!
 //! Handlers only parse the request, run a query from [`crate::queries`] through the injected
 //! [`InfluxQuery`], and shape the result. Time is injected too, so tests control it.
@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use crate::error::ApiError;
 use crate::influx::InfluxQuery;
 use crate::queries::{
-    Chain, FeedSummary, SeriesPoint, health_query, last_poll_at, latest_by_feed, latest_query,
-    series_points, series_query, valid_feed_id,
+    Chain, CompareRow, FeedSummary, SeriesPoint, compare, health_query, last_poll_at,
+    latest_by_feed, latest_query, series_points, series_query, valid_feed_id,
 };
 
 /// How long `/api/health` waits for InfluxDB, so it answers within 1 s (NFR-2).
@@ -60,6 +60,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/health", get(health))
         .route("/api/feeds", get(feeds))
         .route("/api/feeds/{chain}/{feed_id}", get(feed_detail))
+        .route("/api/compare", get(compare_feeds))
         .with_state(state)
 }
 
@@ -167,6 +168,27 @@ async fn feed_detail(
         return Err(not_found(chain, &feed_id));
     }
     Ok(Json(FeedDetail { latest, series }))
+}
+
+/// Body of `GET /api/compare`.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareResponse {
+    /// When the poller last finished a cycle, Unix seconds.
+    pub last_poll_at: Option<u64>,
+    /// The feeds present on Ethereum, Arbitrum and Base, by feed ID.
+    pub feeds: Vec<CompareRow>,
+}
+
+async fn compare_feeds(State(state): State<AppState>) -> Result<Json<CompareResponse>, ApiError> {
+    let rows = state
+        .store
+        .query(&latest_query(&state.bucket, None, None, LATEST_WINDOW_S))
+        .await?;
+    Ok(Json(CompareResponse {
+        last_poll_at: last_poll_at(&rows),
+        feeds: compare(&latest_by_feed(&rows)),
+    }))
 }
 
 fn parse_chain(text: &str) -> Result<Chain, ApiError> {

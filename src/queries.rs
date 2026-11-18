@@ -1,6 +1,6 @@
 //! Flux queries for each route, and the pure functions that turn their rows into responses.
 //!
-//! Delivers FR-FW-6 (feeds) and NFR-2 (health). Flux takes `last()` of every series; Rust then keeps,
+//! Delivers FR-FW-6 (feeds and compare) and NFR-2 (health). Flux takes `last()` of every series; Rust then keeps,
 //! per feed and measurement, only the fields written at the newest time. That drops a stale optional
 //! field (such as `reference_deviation_pct`, absent from the newest point) and an older `status` series.
 //!
@@ -302,6 +302,75 @@ pub fn series_points(rows: &[Row]) -> Vec<SeriesPoint> {
     points.into_values().collect()
 }
 
+/// One chain's side of a [`CompareRow`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChainValue {
+    /// The price on this chain, if it could be read.
+    pub value: Option<f64>,
+    /// Seconds since this chain's feed was last updated.
+    pub age_s: Option<u64>,
+    /// This chain's latest check status.
+    pub status: String,
+}
+
+/// One feed present on every chain, side by side.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompareRow {
+    /// The manifest key, such as `ETH`.
+    pub feed_id: String,
+    /// Each chain's value, age and status, keyed `ethereum`, `arbitrum` and `base`.
+    pub chains: BTreeMap<Chain, ChainValue>,
+    /// `(max - min) / median × 100` over the chains' values; `null` with fewer than two values.
+    pub spread_pct: Option<f64>,
+}
+
+/// The feeds present on all three chains, by feed ID, with their cross-chain spread.
+pub fn compare(feeds: &[FeedSummary]) -> Vec<CompareRow> {
+    let mut by_id: BTreeMap<&str, BTreeMap<Chain, ChainValue>> = BTreeMap::new();
+    for feed in feeds {
+        by_id.entry(&feed.feed_id).or_default().insert(
+            feed.chain,
+            ChainValue {
+                value: feed.value,
+                age_s: feed.age_s,
+                status: feed.status.clone(),
+            },
+        );
+    }
+    by_id
+        .into_iter()
+        .filter(|(_, chains)| chains.len() == Chain::ALL.len())
+        .map(|(id, chains)| {
+            let values: Vec<f64> = chains.values().filter_map(|c| c.value).collect();
+            CompareRow {
+                feed_id: id.to_owned(),
+                spread_pct: spread(&values),
+                chains,
+            }
+        })
+        .collect()
+}
+
+/// Cross-chain spread: `(max - min) / median × 100`, in percent. `None` with fewer than two values
+/// or a zero median. Same definition as feedwatch-poller `checks::spread` (SPEC).
+pub fn spread(values: &[f64]) -> Option<f64> {
+    if values.len() < 2 {
+        return None;
+    }
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    let mid = sorted.len() / 2;
+    let median = if sorted.len().is_multiple_of(2) {
+        (sorted[mid - 1] + sorted[mid]) / 2.0
+    } else {
+        sorted[mid]
+    };
+    let (min, max) = (sorted[0], sorted[sorted.len() - 1]);
+    (median != 0.0).then(|| (max - min) / median * 100.0)
+}
+
 fn cell<'a>(row: &'a Row, name: &str) -> Option<&'a str> {
     row.get(name).map(String::as_str).filter(|v| !v.is_empty())
 }
@@ -489,5 +558,48 @@ mod tests {
         assert!(series.contains("aggregateWindow(every: 5m"));
         assert_eq!(Chain::parse("base"), Some(Chain::Base));
         assert_eq!(Chain::parse("Base"), None);
+    }
+
+    fn summary(chain: Chain, id: &str, value: Option<f64>) -> FeedSummary {
+        FeedSummary {
+            value,
+            age_s: Some(30),
+            status: if value.is_some() { "ok" } else { "error" }.to_owned(),
+            ..FeedSummary::empty(chain, id)
+        }
+    }
+
+    #[test]
+    fn fr_fw_6_compare_keeps_feeds_on_all_three_chains() {
+        let feeds = vec![
+            summary(Chain::Ethereum, "ETH", Some(99.0)),
+            summary(Chain::Arbitrum, "ETH", Some(100.0)),
+            summary(Chain::Base, "ETH", Some(101.0)),
+            summary(Chain::Ethereum, "BTC", Some(1.0)),
+            summary(Chain::Base, "BTC", Some(1.0)),
+            summary(Chain::Ethereum, "USDC", Some(1.0)),
+            summary(Chain::Arbitrum, "USDC", None),
+            summary(Chain::Base, "USDC", Some(1.0)),
+        ];
+        let rows = compare(&feeds);
+        assert_eq!(rows.len(), 2, "BTC is missing on Arbitrum");
+        assert_eq!(rows[0].feed_id, "ETH");
+        assert!((rows[0].spread_pct.unwrap() - 2.0).abs() < 1e-9);
+        assert_eq!(rows[0].chains[&Chain::Base].value, Some(101.0));
+        assert_eq!(rows[1].feed_id, "USDC");
+        assert_eq!(rows[1].chains[&Chain::Arbitrum].status, "error");
+        assert_eq!(
+            rows[1].spread_pct,
+            Some(0.0),
+            "spread over the two readable chains"
+        );
+    }
+
+    #[test]
+    fn spread_is_range_over_median() {
+        assert_eq!(spread(&[100.0]), None);
+        assert_eq!(spread(&[0.0, 0.0]), None);
+        assert!((spread(&[99.0, 100.0, 101.0]).unwrap() - 2.0).abs() < 1e-9);
+        assert!((spread(&[100.0, 102.0]).unwrap() - 1.980_198).abs() < 1e-5);
     }
 }
